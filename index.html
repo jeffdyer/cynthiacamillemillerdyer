@@ -171,6 +171,16 @@
       .music:hover,
       .music:focus-visible { opacity: 0.85; }
 
+      /* No box around it in any state. The opacity lift above is the whole
+         affordance and it fires on focus as well as hover, so taking the ring
+         off does not leave a keyboard user with nothing to go on.
+         ::-moz-focus-inner is Firefox's own inner border on click, and the tap
+         highlight is the grey block iOS paints over a tapped control. */
+      .music:focus,
+      .music:focus-visible { outline: none; }
+      .music::-moz-focus-inner { border: 0; }
+      .music { -webkit-tap-highlight-color: transparent; }
+
       .music-icon { width: 20px; height: 20px; }
       .music-icon .spk { fill: currentColor; }
       .music-icon .waves,
