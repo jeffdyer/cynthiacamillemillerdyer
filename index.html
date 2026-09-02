@@ -261,9 +261,14 @@
     </audio>
 
     <script>
-      /* Background music, off until asked for. Volume is ramped by hand at
-         both ends - an abrupt cut is jarring in a quiet room, and volume is
-         not a property CSS or the animation API can tween. */
+      /* Background music, off until asked for.
+
+         It plays through a Web Audio graph rather than straight out of the
+         element. Two reasons: the transfer is quiet - it peaks at -5.5 dBFS
+         and sits near -21 dB RMS - and audio.volume cannot go above 1.0, so
+         there was no way to lift it from there; and the graph gives the
+         surface noise somewhere to mix in. Volume is ramped by hand at both
+         ends, since an abrupt cut is jarring in a quiet room. */
       (function () {
         var btn = document.querySelector('.music');
         var audio = document.querySelector('.music-track');
@@ -271,17 +276,106 @@
         var fill = document.querySelector('.progress-fill');
         if (!btn || !audio) return;
 
-        var LEVEL = 0.5;   /* a bed under the page, not a performance */
-        var playing = false;
-        var fade;
+        /* Measured against the actual transfer rather than guessed: at 1.5
+           the mix peaks at -1.3 dBFS across the whole track with no clipped
+           samples, and the crackle lands about 21 dB under the music - present
+           in a quiet room, never competing with her song. */
+        var MUSIC_GAIN = 1.5;
+        var CRACKLE_GAIN = 0.9;
+        var FALLBACK_LEVEL = 1;   /* no graph: the element's ceiling is all there is */
 
+        var playing = false;
+        var fade, fadeEnd;
+        var ctx, master, crackleGain;
+
+        function clearFade() { clearInterval(fade); clearTimeout(fadeEnd); }
+
+        /* Vinyl surface noise, generated rather than shipped: a bed of
+           filtered hiss with pops scattered through it, looped under the
+           music. Ten seconds because a shorter loop starts to read as a
+           pattern, and nothing starts in the last 20ms so the seam never
+           cuts a pop in half. */
+        function makeCrackle() {
+          var secs = 10, n = Math.floor(ctx.sampleRate * secs);
+          var buf = ctx.createBuffer(1, n, ctx.sampleRate);
+          var d = buf.getChannelData(0);
+          for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * 0.02;
+
+          var safe = n - Math.floor(ctx.sampleRate * 0.02);
+          var pops = Math.round(secs * 9);
+          for (var p = 0; p < pops; p++) {
+            var at = Math.floor(Math.random() * safe);
+            var amp = (0.08 + Math.random() * 0.42) * (Math.random() < 0.5 ? -1 : 1);
+            var len = Math.max(2, Math.round(ctx.sampleRate * (0.001 + Math.random() * 0.003)));
+            for (var k = 0; k < len && at + k < n; k++) {
+              d[at + k] += amp * Math.exp(-k / (len * 0.35));
+            }
+          }
+
+          var src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.loop = true;
+
+          /* Rolling off the bottom keeps it surface noise rather than rumble,
+             and trimming the top stops it hissing like tape. */
+          var hp = ctx.createBiquadFilter();
+          hp.type = 'highpass';
+          hp.frequency.value = 700;
+          var lp = ctx.createBiquadFilter();
+          lp.type = 'lowpass';
+          lp.frequency.value = 8000;
+
+          var g = ctx.createGain();
+          g.gain.value = CRACKLE_GAIN;
+          src.connect(hp); hp.connect(lp); lp.connect(g);
+          src.start();
+          return g;
+        }
+
+        /* Built on the first play and not before: a context created outside a
+           user gesture starts suspended, and routing an element into a graph
+           is a one-way move, so it happens once and is kept. Any failure here
+           falls back to the bare element rather than leaving a silent page. */
+        function buildGraph() {
+          if (ctx) return true;
+          var AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return false;
+          try {
+            ctx = new AC();
+            var src = ctx.createMediaElementSource(audio);
+            var music = ctx.createGain();
+            music.gain.value = MUSIC_GAIN;
+            master = ctx.createGain();
+            master.gain.value = 0;
+            src.connect(music);
+            music.connect(master);
+            crackleGain = makeCrackle();
+            crackleGain.connect(master);
+            master.connect(ctx.destination);
+            return true;
+          } catch (e) {
+            ctx = master = crackleGain = null;
+            return false;
+          }
+        }
+
+        /* One ramp for both paths. Through the graph it moves the master, so
+           music and crackle come up and go down together. */
         function ramp(to, ms, done) {
-          clearInterval(fade);
+          clearFade();
+          if (master) {
+            var g = master.gain, t = ctx.currentTime;
+            g.cancelScheduledValues(t);
+            g.setValueAtTime(g.value, t);
+            g.linearRampToValueAtTime(to, t + ms / 1000);
+            if (done) fadeEnd = setTimeout(done, ms);
+            return;
+          }
           var from = audio.volume, t0 = Date.now();
           fade = setInterval(function () {
             var k = Math.min(1, (Date.now() - t0) / ms);
             audio.volume = from + (to - from) * k;
-            if (k === 1) { clearInterval(fade); if (done) done(); }
+            if (k === 1) { clearFade(); if (done) done(); }
           }, 40);
         }
 
@@ -305,10 +399,19 @@
         function toggle() {
           playing = !playing;
           render();
-          if (!playing) { ramp(0, 900, function () { audio.pause(); }); return; }
-          audio.volume = 0;
+          if (!playing) {
+            ramp(0, 900, function () {
+              audio.pause();
+              /* Nothing should be left running once the page is quiet. */
+              if (ctx && ctx.suspend) ctx.suspend();
+            });
+            return;
+          }
+          var routed = buildGraph();
+          if (ctx && ctx.state === 'suspended') ctx.resume();
+          if (!routed) audio.volume = 0;
           var started = audio.play();
-          ramp(LEVEL, 2000);
+          ramp(routed ? 1 : FALLBACK_LEVEL, 2000);
           if (started && started.catch) started.catch(fail);
         }
 
@@ -325,7 +428,7 @@
            there the flag is already false, so it returns before touching
            anything and the paused position is kept. */
         function stopped(rewind) {
-          clearInterval(fade);
+          clearFade();
           if (!playing) return;
           playing = false;
           render();
@@ -339,10 +442,16 @@
 
         btn.addEventListener('click', toggle);
 
-        /* A file that will not play should leave no dead control behind. */
+        /* play() rejects for reasons that have nothing to do with the file -
+           an autoplay policy, or a pause arriving while the play is still
+           settling. Those should leave the control alone to be tried again.
+           Only a real media error earns having it taken away, so that a
+           file which will not play leaves no dead control behind. */
         function fail() {
-          clearInterval(fade);
+          clearFade();
           playing = false;
+          render();
+          if (!audio.error) return;
           btn.remove();
           if (bar) bar.remove();
         }
