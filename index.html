@@ -171,16 +171,6 @@
       .music:hover,
       .music:focus-visible { opacity: 0.85; }
 
-      /* No box around it in any state. The opacity lift above is the whole
-         affordance and it fires on focus as well as hover, so taking the ring
-         off does not leave a keyboard user with nothing to go on.
-         ::-moz-focus-inner is Firefox's own inner border on click, and the tap
-         highlight is the grey block iOS paints over a tapped control. */
-      .music:focus,
-      .music:focus-visible { outline: none; }
-      .music::-moz-focus-inner { border: 0; }
-      .music { -webkit-tap-highlight-color: transparent; }
-
       .music-icon { width: 20px; height: 20px; }
       .music-icon .spk { fill: currentColor; }
       .music-icon .waves,
@@ -274,11 +264,10 @@
       /* Background music, off until asked for.
 
          It plays through a Web Audio graph rather than straight out of the
-         element. Two reasons: the transfer is quiet - it peaks at -5.5 dBFS
+         element, for one reason: the transfer is quiet - it peaks at -5.5 dBFS
          and sits near -21 dB RMS - and audio.volume cannot go above 1.0, so
-         there was no way to lift it from there; and the graph gives the
-         surface noise somewhere to mix in. Volume is ramped by hand at both
-         ends, since an abrupt cut is jarring in a quiet room. */
+         there was no headroom left to lift it from there. Volume is ramped by
+         hand at both ends, since an abrupt cut is jarring in a quiet room. */
       (function () {
         var btn = document.querySelector('.music');
         var audio = document.querySelector('.music-track');
@@ -286,61 +275,17 @@
         var fill = document.querySelector('.progress-fill');
         if (!btn || !audio) return;
 
-        /* Measured against the actual transfer rather than guessed: at 1.5
-           the mix peaks at -1.3 dBFS across the whole track with no clipped
-           samples, and the crackle lands about 21 dB under the music - present
-           in a quiet room, never competing with her song. */
-        var MUSIC_GAIN = 1.5;
-        var CRACKLE_GAIN = 0.9;
+        /* Measured against the actual transfer rather than guessed: its true
+           peak across both channels is 0.5282, so 1.8 is the whole of the
+           available headroom - it lands at -0.44 dBFS and cannot clip. */
+        var MUSIC_GAIN = 1.8;
         var FALLBACK_LEVEL = 1;   /* no graph: the element's ceiling is all there is */
 
         var playing = false;
         var fade, fadeEnd;
-        var ctx, master, crackleGain;
+        var ctx, master;
 
         function clearFade() { clearInterval(fade); clearTimeout(fadeEnd); }
-
-        /* Vinyl surface noise, generated rather than shipped: a bed of
-           filtered hiss with pops scattered through it, looped under the
-           music. Ten seconds because a shorter loop starts to read as a
-           pattern, and nothing starts in the last 20ms so the seam never
-           cuts a pop in half. */
-        function makeCrackle() {
-          var secs = 10, n = Math.floor(ctx.sampleRate * secs);
-          var buf = ctx.createBuffer(1, n, ctx.sampleRate);
-          var d = buf.getChannelData(0);
-          for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * 0.02;
-
-          var safe = n - Math.floor(ctx.sampleRate * 0.02);
-          var pops = Math.round(secs * 9);
-          for (var p = 0; p < pops; p++) {
-            var at = Math.floor(Math.random() * safe);
-            var amp = (0.08 + Math.random() * 0.42) * (Math.random() < 0.5 ? -1 : 1);
-            var len = Math.max(2, Math.round(ctx.sampleRate * (0.001 + Math.random() * 0.003)));
-            for (var k = 0; k < len && at + k < n; k++) {
-              d[at + k] += amp * Math.exp(-k / (len * 0.35));
-            }
-          }
-
-          var src = ctx.createBufferSource();
-          src.buffer = buf;
-          src.loop = true;
-
-          /* Rolling off the bottom keeps it surface noise rather than rumble,
-             and trimming the top stops it hissing like tape. */
-          var hp = ctx.createBiquadFilter();
-          hp.type = 'highpass';
-          hp.frequency.value = 700;
-          var lp = ctx.createBiquadFilter();
-          lp.type = 'lowpass';
-          lp.frequency.value = 8000;
-
-          var g = ctx.createGain();
-          g.gain.value = CRACKLE_GAIN;
-          src.connect(hp); hp.connect(lp); lp.connect(g);
-          src.start();
-          return g;
-        }
 
         /* Built on the first play and not before: a context created outside a
            user gesture starts suspended, and routing an element into a graph
@@ -359,18 +304,16 @@
             master.gain.value = 0;
             src.connect(music);
             music.connect(master);
-            crackleGain = makeCrackle();
-            crackleGain.connect(master);
             master.connect(ctx.destination);
             return true;
           } catch (e) {
-            ctx = master = crackleGain = null;
+            ctx = master = null;
             return false;
           }
         }
 
-        /* One ramp for both paths. Through the graph it moves the master, so
-           music and crackle come up and go down together. */
+        /* One ramp for both paths: the master through the graph, the
+           element's own volume without it. */
         function ramp(to, ms, done) {
           clearFade();
           if (master) {
