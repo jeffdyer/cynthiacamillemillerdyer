@@ -153,6 +153,65 @@
       }
 
 
+      /* A speaker icon rather than words: it says the same thing in a quarter
+         of the space, and the page has no other prose to match. */
+      .music {
+        display: block;
+        margin: 1.1rem auto 0;
+        padding: 0.3rem;
+        border: 0;
+        background: none;
+        color: var(--ink);
+        line-height: 0;
+        opacity: 0.5;
+        cursor: pointer;
+        transition: opacity 0.3s ease;
+      }
+
+      .music:hover,
+      .music:focus-visible { opacity: 0.85; }
+
+      .music-icon { width: 20px; height: 20px; }
+      .music-icon .spk { fill: currentColor; }
+      .music-icon .waves,
+      .music-icon .slash { fill: none; stroke: currentColor; }
+
+      /* Silent shows a cross where the waves would be, playing shows the
+         waves. A cross rather than a line struck through the whole glyph:
+         both are conventional, but a struck-through line crosses the filled
+         speaker body and would need knocking out against a gradient that
+         changes down the page. The cross sits in empty space and stays
+         legible on any background. The button's aria-pressed drives which
+         half shows, so there is one source of truth. */
+      .music[aria-pressed="false"] .waves,
+      .music[aria-pressed="true"] .slash { display: none; }
+
+      /* A hairline that fills as the recording plays, and is not there at
+         all otherwise. Opacity rather than display, so the footer does not
+         reflow when it comes and goes. */
+      .progress {
+        width: min(190px, 55%);
+        height: 2px;
+        margin: 0.6rem auto 0;
+        border-radius: 1px;
+        background: rgba(var(--shadow), 0.16);
+        overflow: hidden;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+      }
+
+      .progress.on { opacity: 1; }
+
+      .progress-fill {
+        display: block;
+        width: 0;
+        height: 100%;
+        background: var(--ink);
+        opacity: 0.5;
+        /* timeupdate only fires a few times a second; this carries the bar
+           between ticks so it creeps rather than steps. */
+        transition: width 0.25s linear;
+      }
 
       @keyframes rise {
         from { opacity: 0; transform: translateY(14px); }
@@ -178,6 +237,117 @@
     <footer>
       <p class="memory">In loving memory</p>
       <p class="obit-link"><a href="obituary.html">Read her obituary</a></p>
+      <button class="music" type="button" aria-pressed="false" aria-label="Play music">
+        <svg class="music-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path class="spk" d="M1.8 6h2.7L8 3.1v9.8L4.5 10H1.8z"/>
+          <g class="waves" stroke-width="1.35" stroke-linecap="round">
+            <path d="M10.4 5.9a3.2 3.2 0 0 1 0 4.2"/>
+            <path d="M12.5 4.1a6 6 0 0 1 0 7.8"/>
+          </g>
+          <g class="slash" stroke-width="1.5" stroke-linecap="round">
+            <path d="M10.7 5.9l3.9 3.9"/>
+            <path d="M14.6 5.9l-3.9 3.9"/>
+          </g>
+        </svg>
+      </button>
+      <div class="progress" aria-hidden="true"><span class="progress-fill"></span></div>
     </footer>
+
+    <!-- preload="none" so a visitor who never asks for music never downloads
+         it, and no autoplay attribute anywhere. It plays once rather than
+         looping. -->
+    <audio class="music-track" preload="none">
+      <source src="look-to-the-rainbow.m4a" type="audio/mp4">
+    </audio>
+
+    <script>
+      /* Background music, off until asked for. Volume is ramped by hand at
+         both ends - an abrupt cut is jarring in a quiet room, and volume is
+         not a property CSS or the animation API can tween. */
+      (function () {
+        var btn = document.querySelector('.music');
+        var audio = document.querySelector('.music-track');
+        var bar = document.querySelector('.progress');
+        var fill = document.querySelector('.progress-fill');
+        if (!btn || !audio) return;
+
+        var LEVEL = 0.5;   /* a bed under the page, not a performance */
+        var playing = false;
+        var fade;
+
+        function ramp(to, ms, done) {
+          clearInterval(fade);
+          var from = audio.volume, t0 = Date.now();
+          fade = setInterval(function () {
+            var k = Math.min(1, (Date.now() - t0) / ms);
+            audio.volume = from + (to - from) * k;
+            if (k === 1) { clearInterval(fade); if (done) done(); }
+          }, 40);
+        }
+
+        /* Every control and label reads off `playing`, so the ended handler
+           can put things back simply by clearing it and calling this. */
+        function render() {
+          btn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+          btn.setAttribute('aria-label', playing ? 'Pause music' : 'Play music');
+          if (bar) bar.classList.toggle('on', playing);
+        }
+
+        /* Duration is NaN until metadata arrives, and preload is none, so it
+           is genuinely absent until the first play. */
+        audio.addEventListener('timeupdate', function () {
+          if (!fill || !playing) return;
+          var d = audio.duration;
+          if (!d || d !== d) return;
+          fill.style.width = Math.min(100, (audio.currentTime / d) * 100) + '%';
+        });
+
+        function toggle() {
+          playing = !playing;
+          render();
+          if (!playing) { ramp(0, 900, function () { audio.pause(); }); return; }
+          audio.volume = 0;
+          var started = audio.play();
+          ramp(LEVEL, 2000);
+          if (started && started.catch) started.catch(fail);
+        }
+
+        /* Playback can stop without our asking: the recording runs out, or
+           the browser interrupts it. Either way the control has to come back
+           to offering it rather than sitting there showing sound.
+
+           render() runs BEFORE the rewind, because seeking an element that
+           has just ended throws in some browsers and the throw would take
+           the icon update down with it. The seek is last and guarded, so it
+           cannot take anything with it if it fails.
+
+           Guarding on `playing` keeps our own fade-out from tripping this:
+           there the flag is already false, so it returns before touching
+           anything and the paused position is kept. */
+        function stopped(rewind) {
+          clearInterval(fade);
+          if (!playing) return;
+          playing = false;
+          render();
+          if (rewind) {
+            try { audio.currentTime = 0; } catch (e) {}
+            if (fill) fill.style.width = '0';   /* masked by the bar fading out */
+          }
+        }
+        audio.addEventListener('ended', function () { stopped(true); });
+        audio.addEventListener('pause', function () { stopped(false); });
+
+        btn.addEventListener('click', toggle);
+
+        /* A file that will not play should leave no dead control behind. */
+        function fail() {
+          clearInterval(fade);
+          playing = false;
+          btn.remove();
+          if (bar) bar.remove();
+        }
+        audio.addEventListener('error', fail);
+      })();
+    </script>
   </body>
 </html>
